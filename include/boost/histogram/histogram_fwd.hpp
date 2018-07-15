@@ -46,8 +46,8 @@ using any_std = mp11::mp_rename<types, any>;
 
 } // namespace axis
 
-struct dynamic_tag {};
-struct static_tag {};
+using dynamic_tag = std::true_type;
+using static_tag = std::false_type;
 template <class Type, class Axes, class Storage = adaptive_storage>
 class histogram;
 

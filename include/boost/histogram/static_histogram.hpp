@@ -54,11 +54,11 @@ public:
             typename = detail::requires_axis<Axis0>>
   explicit histogram(Axis0 &&axis0, Axis &&... axis)
       : axes_(std::forward<Axis0>(axis0), std::forward<Axis>(axis)...) {
-    storage_ = Storage(bincount_from_axes());
+    storage_ = Storage(size_from_axes());
   }
 
   explicit histogram(axes_type &&axes) : axes_(std::move(axes)) {
-    storage_ = Storage(bincount_from_axes());
+    storage_ = Storage(size_from_axes());
   }
 
   template <typename S>
@@ -135,71 +135,65 @@ public:
     return *this;
   }
 
-  template <typename... Ts> void operator()(Ts &&... ts) {
+  template <typename... Ts> void operator()(const Ts &... ts) {
     // case with one argument is ambiguous, is specialized below
     static_assert(sizeof...(Ts) == axes_size::value,
                   "fill arguments do not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    xlin<0>(idx, stride, ts...);
-    if (stride)
-      fill_storage_impl(idx);
+    detail::xlin_recursive<axes_type> x(axes_, ts...);
+    if (x.stride)
+      detail::fill_storage(storage_, x.idx);
   }
 
-  template <typename T> void operator()(T &&t) {
+  template <typename T> void operator()(const T &t) {
     // check whether we need to unpack argument
     fill_impl(mp11::mp_if_c<(axes_size::value == 1), detail::no_container_tag,
-                            detail::classify_container<T>>(),
-              std::forward<T>(t));
+                            detail::classify_container<T>>(), t);
   }
 
   // TODO: merge this with unpacking
   template <typename W, typename... Ts>
-  void operator()(detail::weight<W> &&w, Ts &&... ts) {
+  void operator()(const detail::weight<W> &w, const Ts &... ts) {
     // case with one argument is ambiguous, is specialized below
-    std::size_t idx = 0, stride = 1;
-    xlin<0>(idx, stride, ts...);
-    if (stride)
-      fill_storage_impl(idx, std::move(w));
+    detail::xlin_recursive<axes_type> x(axes_, ts...);
+    if (x.stride)
+      detail::fill_storage(storage_, x.idx, w);
   }
 
   // TODO: remove as obsolete
   template <typename W, typename T>
-  void operator()(detail::weight<W> &&w, T &&t) {
+  void operator()(const detail::weight<W> &w, const T &t) {
     // check whether we need to unpack argument
     fill_impl(mp11::mp_if_c<(axes_size::value == 1), detail::no_container_tag,
                             detail::classify_container<T>>(),
-              std::forward<T>(t), std::move(w));
+              t, w);
   }
 
-  template <typename... Ts> const_reference at(Ts &&... ts) const {
+  template <typename... Ts> const_reference at(const Ts &... ts) const {
     // case with one argument is ambiguous, is specialized below
     static_assert(sizeof...(ts) == axes_size::value,
                   "bin arguments do not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    lin<0>(idx, stride, static_cast<int>(ts)...);
-    if (stride == 0)
-      throw std::out_of_range("bin index out of range");
-    return storage_[idx];
+    detail::lin_recursive<axes_type> x(axes_, static_cast<int>(ts)...);
+    return detail::storage_get(storage_, x.idx, x.stride == 0);
   }
 
-  template <typename T> const_reference operator[](T &&t) const {
+  template <typename T> const_reference operator[](const T &t) const {
     // check whether we need to unpack argument
-    return at_impl(detail::classify_container<T>(), std::forward<T>(t));
+    return at_impl(detail::classify_container<T>(), t);
   }
 
-  template <typename T> const_reference at(T &&t) const {
+  template <typename T> const_reference at(const T &t) const {
     // check whether we need to unpack argument
-    return at_impl(detail::classify_container<T>(), std::forward<T>(t));
+    return at_impl(detail::classify_container<T>(), t);
   }
 
   /// Number of axes (dimensions) of histogram
   constexpr unsigned dim() const noexcept { return axes_size::value; }
 
   /// Total number of bins in the histogram (including underflow/overflow)
-  std::size_t bincount() const noexcept { return storage_.size(); }
+  std::size_t size() const noexcept { return storage_.size(); }
 
   /// Reset bin counters to zero
-  void reset() { storage_ = Storage(bincount_from_axes()); }
+  void reset() { storage_ = Storage(size_from_axes()); }
 
   /// Get N-th axis (const version)
   template <int N>
@@ -259,186 +253,71 @@ private:
   axes_type axes_;
   Storage storage_;
 
-  std::size_t bincount_from_axes() const noexcept {
+  std::size_t size_from_axes() const noexcept {
     detail::field_count_visitor fc;
-    mp11::tuple_for_each(axes_, fc);
+    for_each_axis(fc);
     return fc.value;
   }
 
-  template <typename T>
-  void fill_storage_impl(std::size_t idx, detail::weight<T> &&w) {
-    storage_.add(idx, w);
-  }
-
-  void fill_storage_impl(std::size_t idx) { storage_.increase(idx); }
-
   template <typename T, typename... Ts>
-  void fill_impl(detail::dynamic_container_tag, T &&t, Ts &&... ts) {
+  void fill_impl(detail::dynamic_container_tag, const T &t, const Ts &... ts) {
     BOOST_ASSERT_MSG(std::distance(std::begin(t), std::end(t)) ==
                          axes_size::value,
                      "fill container does not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    xlin_iter(axes_size(), idx, stride, std::begin(t));
-    if (stride) {
-      fill_storage_impl(idx, std::forward<Ts>(ts)...);
+    detail::xlin_dynamic<axes_type, decltype(std::begin(t))> x(axes_, std::begin(t));
+    if (x.stride) {
+      detail::fill_storage(storage_, x.idx, ts...);
     }
   }
 
   template <typename T, typename... Ts>
-  void fill_impl(detail::static_container_tag, T &&t, Ts &&... ts) {
+  void fill_impl(detail::static_container_tag, const T &t, const Ts &... ts) {
     static_assert(detail::mp_size<T>::value == axes_size::value,
                   "fill container does not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    xlin_get(axes_size(), idx, stride, std::forward<T>(t));
-    if (stride) {
-      fill_storage_impl(idx, std::forward<Ts>(ts)...);
+    detail::xlin_static<axes_type, T> x(axes_, t);
+    if (x.stride) {
+      detail::fill_storage(storage_, x.idx, ts...);
     }
   }
 
   template <typename T, typename... Ts>
-  void fill_impl(detail::no_container_tag, T &&t, Ts &&... ts) {
+  void fill_impl(detail::no_container_tag, const T &t, const Ts &... ts) {
     static_assert(axes_size::value == 1,
                   "fill argument does not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    xlin<0>(idx, stride, std::forward<T>(t));
-    if (stride) {
-      fill_storage_impl(idx, std::forward<Ts>(ts)...);
+    detail::xlin_recursive<axes_type> x(axes_, t);
+    if (x.stride) {
+      detail::fill_storage(storage_, x.idx, ts...);
     }
   }
 
   template <typename T>
-  const_reference at_impl(detail::dynamic_container_tag, T &&t) const {
+  const_reference at_impl(detail::dynamic_container_tag, const T &t) const {
     BOOST_ASSERT_MSG(std::distance(std::begin(t), std::end(t)) ==
                          axes_size::value,
                      "bin container does not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    lin_iter(axes_size(), idx, stride, std::begin(t));
-    if (stride == 0)
-      throw std::out_of_range("bin index out of range");
-    return storage_[idx];
+    detail::lin_dynamic<axes_type, decltype(std::begin(t))> x(axes_, std::begin(t));
+    return detail::storage_get(storage_, x.idx, x.stride == 0);
   }
 
   template <typename T>
-  const_reference at_impl(detail::static_container_tag, T &&t) const {
+  const_reference at_impl(detail::static_container_tag, const T &t) const {
     static_assert(mp11::mp_size<T>::value == axes_size::value,
                   "bin container does not match histogram dimension");
-    std::size_t idx = 0, stride = 1;
-    lin_get(axes_size(), idx, stride, std::forward<T>(t));
-    if (stride == 0)
-      throw std::out_of_range("bin index out of range");
-    return storage_[idx];
+    detail::lin_static<axes_type, T> x(axes_, t);
+    return detail::storage_get(storage_, x.idx, x.stride == 0);
   }
 
   template <typename T>
-  const_reference at_impl(detail::no_container_tag, T &&t) const {
-    std::size_t idx = 0, stride = 1;
-    lin<0>(idx, stride, detail::indirect_int_cast(t));
-    if (stride == 0)
-      throw std::out_of_range("bin index out of range");
-    return storage_[idx];
+  const_reference at_impl(detail::no_container_tag, const T &t) const {
+    detail::lin_recursive<axes_type> x(axes_, detail::indirect_int_cast(t));
+    return detail::storage_get(storage_, x.idx, x.stride == 0);
   }
-
-  template <unsigned D>
-  inline void xlin(std::size_t &, std::size_t &) const noexcept {}
-
-  template <unsigned D, typename T, typename... Ts>
-  inline void xlin(std::size_t &idx, std::size_t &stride, T &&t,
-                   Ts &&... ts) const {
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    const int j = std::get<D>(axes_).index(t);
-    detail::lin(idx, stride, a_size, a_shape, j);
-    xlin<D + 1>(idx, stride, std::forward<Ts>(ts)...);
-  }
-
-  template <typename Iterator>
-  void xlin_iter(mp11::mp_size_t<0>, std::size_t &, std::size_t &,
-                 Iterator) const noexcept {}
-
-  template <long unsigned int N, typename Iterator>
-  void xlin_iter(mp11::mp_size_t<N>, std::size_t &idx, std::size_t &stride,
-                 Iterator iter) const {
-    constexpr unsigned D = axes_size::value - N;
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    const int j = std::get<D>(axes_).index(*iter);
-    detail::lin(idx, stride, a_size, a_shape, j);
-    xlin_iter(mp11::mp_size_t<N - 1>(), idx, stride, ++iter);
-  }
-
-  template <unsigned D>
-  inline void lin(std::size_t &, std::size_t &) const noexcept {}
-
-  template <unsigned D, typename... Ts>
-  inline void lin(std::size_t &idx, std::size_t &stride, int j, Ts... ts) const
-      noexcept {
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    stride *= (-1 <= j && j <= a_size); // set stride to zero, if j is invalid
-    detail::lin(idx, stride, a_size, a_shape, j);
-    lin<(D + 1)>(idx, stride, ts...);
-  }
-
-  template <typename Iterator>
-  void lin_iter(mp11::mp_size_t<0>, std::size_t &, std::size_t &,
-                Iterator) const noexcept {}
-
-  template <long unsigned int N, typename Iterator>
-  void lin_iter(mp11::mp_size_t<N>, std::size_t &idx, std::size_t &stride,
-                Iterator iter) const noexcept {
-    constexpr unsigned D = axes_size::value - N;
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    const auto j = detail::indirect_int_cast(*iter);
-    stride *= (-1 <= j && j <= a_size); // set stride to zero, if j is invalid
-    detail::lin(idx, stride, a_size, a_shape, j);
-    lin_iter(mp11::mp_size_t<(N - 1)>(), idx, stride, ++iter);
-  }
-
-  template <typename T>
-  void xlin_get(mp11::mp_size_t<0>, std::size_t &, std::size_t &, T &&) const
-      noexcept {}
-
-  template <long unsigned int N, typename T>
-  void xlin_get(mp11::mp_size_t<N>, std::size_t &idx, std::size_t &stride,
-                T &&t) const {
-    constexpr unsigned D = detail::mp_size<T>::value - N;
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    const auto j = std::get<D>(axes_).index(std::get<D>(t));
-    detail::lin(idx, stride, a_size, a_shape, j);
-    xlin_get(mp11::mp_size_t<(N - 1)>(), idx, stride, std::forward<T>(t));
-  }
-
-  template <typename T>
-  void lin_get(mp11::mp_size_t<0>, std::size_t &, std::size_t &, T &&) const
-      noexcept {}
-
-  template <long unsigned int N, typename T>
-  void lin_get(mp11::mp_size_t<N>, std::size_t &idx, std::size_t &stride,
-               T &&t) const noexcept {
-    constexpr unsigned D = detail::mp_size<T>::value - N;
-    const auto a_size = std::get<D>(axes_).size();
-    const auto a_shape = std::get<D>(axes_).shape();
-    const auto j = detail::indirect_int_cast(std::get<D>(t));
-    stride *= (-1 <= j && j <= a_size); // set stride to zero, if j is invalid
-    detail::lin(idx, stride, a_size, a_shape, j);
-    lin_get(mp11::mp_size_t<(N - 1)>(), idx, stride, std::forward<T>(t));
-  }
-
-  struct shape_assign_visitor {
-    mutable std::vector<unsigned>::iterator ni;
-    template <typename Axis> void operator()(const Axis &a) const {
-      *ni = a.shape();
-      ++ni;
-    }
-  };
 
   template <typename H>
   void reduce_impl(H &h, const std::vector<bool> &b) const {
-    std::vector<unsigned> n(dim());
-    for_each_axis(shape_assign_visitor{n.begin()});
-    detail::index_mapper m(n, b);
+    detail::shape_vector_visitor v(dim());
+    for_each_axis(v);
+    detail::index_mapper m(v.shape, b);
     do {
       h.storage_.add(m.second, storage_[m.first]);
     } while (m.next());

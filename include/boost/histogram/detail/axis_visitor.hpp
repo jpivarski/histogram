@@ -9,10 +9,14 @@
 
 #include <boost/histogram/axis/any.hpp>
 #include <boost/histogram/detail/meta.hpp>
+#include <boost/histogram/detail/utility.hpp>
+#include <boost/histogram/detail/cat.hpp>
+#include <boost/type_index.hpp>
 #include <boost/mp11.hpp>
 #include <tuple>
 #include <type_traits>
 #include <vector>
+#include <stdexcept>
 
 namespace boost {
 namespace histogram {
@@ -144,6 +148,215 @@ template <typename Unary> struct unary_visitor : public static_visitor<void> {
   Unary &unary;
   unary_visitor(Unary &u) : unary(u) {}
   template <typename Axis> void operator()(const Axis &a) const { unary(a); }
+};
+
+struct lin_visitor : public static_visitor<void> {
+  std::size_t &idx;
+  std::size_t &stride;
+  const int j;
+
+  lin_visitor(std::size_t &i, std::size_t &s, const int x) noexcept
+      : idx(i),
+        stride(s),
+        j(x) {}
+  template <typename A> void operator()(const A &a) const noexcept {
+    const auto a_size = a.size();
+    const auto a_shape = a.shape();
+    stride *= (-1 <= j && j <= a_size); // set stride to zero, if j is invalid
+    lin(idx, stride, a_size, a_shape, j);
+  }
+};
+
+template <typename V> struct xlin_visitor : public static_visitor<void> {
+  std::size_t &idx;
+  std::size_t &stride;
+  const V &val;
+
+  xlin_visitor(std::size_t &i, std::size_t &s, const V& x) noexcept
+      : idx(i),
+        stride(s),
+        val(x) {}
+
+  template <typename Axis> void operator()(const Axis &a) const {
+    impl(std::is_convertible<V, typename Axis::value_type>(), a);
+  }
+
+  template <typename Axis> void impl(std::true_type, const Axis &a) const {
+    const auto a_size = a.size();
+    const auto a_shape = a.shape();
+    const auto j = a.index(val);
+    lin(idx, stride, a_size, a_shape, j);
+  }
+
+  template <typename Axis> void impl(std::false_type, const Axis &) const {
+    throw std::invalid_argument(
+        cat("fill argument not convertible to axis value type: ",
+            boost::typeindex::type_id<Axis>().pretty_name(), ", ",
+            boost::typeindex::type_id<V>().pretty_name()));
+  }
+};
+
+struct shape_vector_visitor : public static_visitor<void> {
+  mutable std::vector<unsigned> shape;
+  mutable std::vector<unsigned>::iterator iter;
+  shape_vector_visitor(unsigned dim) : shape(dim) {
+    iter = shape.begin();
+  }
+
+  template <typename Axis> void operator()(const Axis &a) const {
+    *iter++ = a.shape();
+  }
+};
+
+template <int N, typename V, typename... Ts>
+void apply(const std::tuple<Ts...>& t, V& v) {
+  v(std::get<N>(t));
+}
+
+template <int N, typename V, typename... Ts>
+void apply(const std::vector<axis::any<Ts...>>& t, V& v) {
+  boost::apply_visitor(v, t[N]);
+}
+
+template <typename Axes>
+struct xlin_recursive {
+  const Axes& axes;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  template <typename... Ts>
+  xlin_recursive(const Axes& a, const Ts&... ts) : axes(a) {
+    iterate(mp11::mp_int<0>(), ts...);
+  }
+
+  template <int N>
+  void iterate(mp11::mp_int<N>) {}
+
+  template <int N, typename T, typename... Ts>
+  void iterate(mp11::mp_int<N>, const T& t, const Ts&... ts) {
+    xlin_visitor<T> v{idx, stride, t};
+    apply<N>(axes, v);
+    iterate(mp11::mp_int<N + 1>(), ts...);
+  }
+};
+
+template <typename Axes>
+struct lin_recursive {
+  const Axes& axes;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  // pre-condition: there are all ints
+  template <typename... Ts>
+  lin_recursive(const Axes& a, Ts... ts) : axes(a) {
+    iterate(mp11::mp_int<0>(), ts...);
+  }
+
+  template <int N>
+  void iterate(mp11::mp_int<N>) {}
+
+  template <int N, typename T, typename... Ts>
+  void iterate(mp11::mp_int<N>, T t, Ts... ts) {
+    lin_visitor v{idx, stride, t};
+    apply<N>(axes, v);
+    iterate(mp11::mp_int<N + 1>(), ts...);
+  }
+};
+
+template <typename Axes, typename T>
+struct xlin_static {
+  const Axes& axes;
+  const T& arg;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  xlin_static(const Axes& a, const T& t) : axes(a), arg(t) {
+    mp11::mp_for_each<mp11::mp_iota<mp11::mp_size<T>>>(*this);
+  }
+
+  template <typename Int>
+  void operator()(Int) {
+    const auto& u = std::get<Int::value>(arg);
+    xlin_visitor<decltype(u)> v{idx, stride, u};
+    apply<Int::value>(axes, v);
+  }
+};
+
+template <typename Axes, typename T>
+struct lin_static {
+  const Axes& axes;
+  const T& arg;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  lin_static(const Axes& a, const T& t) : axes(a), arg(t) {
+    mp11::mp_for_each<mp11::mp_iota<mp11::mp_size<T>>>(*this);
+  }
+
+  template <typename Int>
+  void operator()(Int) {
+    const auto& u = std::get<Int::value>(arg);
+    lin_visitor v{idx, stride, static_cast<int>(u)};
+    apply<Int::value>(axes, v);
+  }
+};
+
+template <typename Axes, typename Iterator>
+struct xlin_dynamic {
+  const Axes& axes;
+  Iterator iter;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  template <typename... Ts>
+  xlin_dynamic(const std::tuple<Ts...>& a, Iterator i) : axes(a), iter(i) {
+    mp11::mp_for_each<mp11::mp_iota<mp11::mp_size<Axes>>>(*this);
+  }
+
+  template <typename... Ts>
+  xlin_dynamic(const std::vector<axis::any<Ts...>>& a, Iterator iter) : axes(a) {
+    for (const auto a : axes) {
+      const auto& u = *iter++;
+      xlin_visitor<decltype(u)> v{idx, stride, u};
+      boost::apply_visitor(v, a);
+    }
+  }
+
+  template <typename Int>
+  void operator()(Int) {
+    const auto& u = *iter++;
+    xlin_visitor<decltype(u)> v{idx, stride, u};
+    apply<Int::value>(axes, v);
+  }
+};
+
+template <typename Axes, typename Iterator>
+struct lin_dynamic {
+  const Axes& axes;
+  Iterator iter;
+  std::size_t idx = 0;
+  std::size_t stride = 1;
+
+  template <typename... Ts>
+  lin_dynamic(const std::tuple<Ts...>& a, Iterator i) : axes(a), iter(i) {
+    mp11::mp_for_each<mp11::mp_iota<mp11::mp_size<Axes>>>(*this);
+  }
+
+  template <typename... Ts>
+  lin_dynamic(const std::vector<axis::any<Ts...>>& a, Iterator iter) : axes(a) {
+    for (const auto& a : axes) {
+      const auto& u = *iter++;
+      lin_visitor v{idx, stride, static_cast<int>(u)};
+      boost::apply_visitor(v, a);
+    }
+  }
+
+  template <typename Int>
+  void operator()(Int) {
+    const auto& u = *iter++;
+    lin_visitor v{idx, stride, static_cast<int>(u)};
+    apply<Int::value>(axes, v);
+  }
 };
 
 } // namespace detail

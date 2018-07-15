@@ -8,6 +8,7 @@
 #define _BOOST_HISTOGRAM_DETAIL_UTILITY_HPP_
 
 #include <algorithm>
+#include <boost/histogram/histogram_fwd.hpp>
 #include <boost/assert.hpp>
 #include <boost/config.hpp>
 #include <boost/histogram/detail/meta.hpp>
@@ -16,6 +17,7 @@
 #include <ostream>
 #include <type_traits>
 #include <vector>
+#include <stdexcept>
 
 namespace boost {
 namespace histogram {
@@ -106,6 +108,19 @@ indirect_int_cast(T &&) noexcept {
   // side-effect of TMP. It must be valid at compile-time.
   BOOST_ASSERT_MSG(false, "bin argument not convertible to int");
   return 0;
+}
+
+template <typename S, typename T>
+void fill_storage(S& s, std::size_t idx, const weight<T> &w) { s.add(idx, w); }
+
+template <typename S>
+void fill_storage(S& s, std::size_t idx) { s.increase(idx); }
+
+template <typename S>
+auto storage_get(const S& s, std::size_t idx, bool error) -> typename S::const_reference {
+  if (error)
+    throw std::out_of_range("bin index out of range");
+  return s[idx];
 }
 
 } // namespace detail
