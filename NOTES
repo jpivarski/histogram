@@ -1,0 +1,2 @@
+Static histogram got slower, dynamic histogram faster
+- try to find out why static histogram got slower and fix this
